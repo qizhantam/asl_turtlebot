@@ -5,7 +5,9 @@ import numpy as np
 from gazebo_msgs.msg import ModelStates
 from std_msgs.msg import Float32MultiArray, String, Int16, Bool
 from geometry_msgs.msg import Twist, PoseArray, Pose2D, PoseStamped
-from asl_turtlebot.msg import DetectedObject, RescueMessage
+# RESCUE MOD
+from asl_turtlebot.msg import DetectedObject
+from asl_turtlebot.msg import RescueMessage
 import tf
 import math
 from enum import Enum
@@ -26,7 +28,7 @@ CROSSING_TIME = 5
 DIST_THRESHOLD = 0.5
 
 # max number of attempts to get to a desired pose
-MAX_NAV_PATH_ATTEMPTS = 50
+MAX_NAV_PATH_ATTEMPTS = 20
 
 # state machine modes, not all implemented
 class Mode(Enum):
@@ -42,7 +44,6 @@ class Mode(Enum):
 class High_Mode(Enum):
     EXPLORE = 1
     RESCUE = 2
-    COMPLETE = 3 #Back Home
 
 class Supervisor:
     """ the state machine of the turtlebot """
@@ -68,19 +69,26 @@ class Supervisor:
         self.animal_poses = {}
 
         # EXPLORATION - MOD
-        #self.exploration_points = []
+        self.exploration_points = []
         #self.exploration_points = [np.array([3.354,0.314,-3.104]), np.array([2.5,0.256,-3.124]), np.array([2.33,1.47,1.586]), np.array([1.375, 1.496,0]), np.array([0.252, 1.515, 0]), np.array([0.291, 0.331,-1.524]), np.array([2.4, 2.735,3.086]),np.array([1.612, 2.811,-3.104]),np.array([3.03, 1.474,0.023]) ]
 
         self.nav_goal_publisher = rospy.Publisher('/cmd_nav', Pose2D, queue_size=10)
         self.pose_goal_publisher = rospy.Publisher('/cmd_pose', Pose2D, queue_size=10)
         self.cmd_vel_publisher = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
 
+        # rospy.Subscriber('Rescuer', String, self.rescue_mode_up)
+        # RESCUE MOD ----------------------------------------------------------------------------
+        #Veggie talking with Bob
+        self.rescuer_publisher = rospy.Publisher('Rescuer', RescueMessage, queue_size=10)
+        self.rescue_message_published = 0 #So that when in Idle we only publish once
+        rospy.Subscriber('Rescuer', RescueMessage, self.rescue_mode_up)
+        # -----------------------------------------------------------------------------------
+
+
         rospy.Subscriber('/detector/stop_sign', DetectedObject, self.stop_sign_detected_callback)
         rospy.Subscriber('/detector/cat', DetectedObject, self.animal_detected_callback)
         rospy.Subscriber('/detector/dog', DetectedObject, self.animal_detected_callback)
         rospy.Subscriber('/detector/elephant', DetectedObject, self.animal_detected_callback)
-        rospy.Subscriber('/detector/bear', DetectedObject, self.animal_detected_callback)
-
         rospy.Subscriber('/move_base_simple/goal', PoseStamped, self.rviz_goal_callback)
 
         #keyboard teleop functionalities
@@ -94,13 +102,6 @@ class Supervisor:
 
         self.trans_listener = tf.TransformListener()
 
-        # Rescue
-        rospy.Subscriber('/Bob_to_tb3', Int16, self.rescue_animal)
-        self.to_Bob_publisher = rospy.Publisher("/tb3_to_Bob", String, queue_size=10)
-        self.menu_published = False
-        self.rescue_end = None
-
-
     #Modified for navigator robustness
     def nav_path_fail_callback(self, msg):
         if msg.data == True:
@@ -111,39 +112,96 @@ class Supervisor:
 
     # MODIFIED
     def teleop_vel_callback(self, msg):
-        # rospy.loginfo("TELEOP CMD RECEIVED")
+        rospy.loginfo("TELEOP CMD RECEIVED")
         self.mode = Mode.MANUAL
         self.cmd_vel_publisher.publish(msg)
 
     # MODIFIED
     def teleop_mode_callback(self, msg):
-        if msg.data == 8:
-            self.high_mode = High_Mode.EXPLORE
-            return
-        elif msg.data == 9:
-            #rospy.loginfo("rescue callback")
-            self.high_mode = High_Mode.RESCUE
-            return
-        if msg.data == 0:
-            #rospy.loginfo("rescue callback")
-            self.high_mode = High_Mode.COMPLETE
-            return
-
         for mode in Mode:
             if mode.value == msg.data:
                 self.mode = mode
+                return
+        for mode in High_Mode:
+            if mode.value == msg.data - len(Mode):
+                #rospy.loginfo("in teleop mode callback")
+                self.high_mode = mode
+                return
+        if msg.data == 0:
+            #rospy.loginfo("rescue callback")
+            self.high_mode = High_Mode.RESCUE
 
-    def rescue_animal(self, msg):
-        if self.high_mode == High_Mode.RESCUE and self.mode == Mode.IDLE:
-            if msg.data in self.animal_poses:
-                pose  = self.animal_poses[msg.data]
-                self.x_g, self.y_g, self.theta_g = pose[1]
-                rospy.loginfo("Going to rescue: {} at {}".format(pose[0], pose[1]))
-                del self.animal_poses[msg.data]
-                self.mode = Mode.NAV
-                self.menu_published = False
-            else:
-                rospy.loginfo("Invalid animal selected {}".format(msg.data))
+
+    #MODIFIED for rescue_publisher
+    # def rescue_mode_up(self, msg):
+    #     if msg.data == "RESCUE_STARTED":
+    #         self.high_mode = High_Mode.RESCUE
+    #     else:
+    #         rospy.loginfo("The rescue message: {} is unidentifiable".format(msg))
+
+    # CHANGE -------------------------g--------------------------------------------------------------
+
+    #MODIFIED for rescue_publisher
+    def rescue_mode_up(self, msg):
+        #Bob told Veggie to start saving animals
+        if msg.action == "RESCUE":
+            self.high_mode = High_Mode.RESCUE
+
+            #Veggie answers by giving Bob the dictionary of all the animals to save
+            self.send_rescue_choices_to_bob()
+
+        #Bob told Veggie to stop saving and start exploring again
+        elif msg.action == "EXPLORE":
+            self.high_mode = High_Mode.EXPLORE
+
+        #Bob choose an animal to save and gave its position is proposed list to Veggie
+        elif str(msg.action).isdigit():
+            self.chosen_animal_index = int(msg.action)
+            self.rescue_message_published = 0
+            try:
+                current_key = int(msg.action)
+                pose = self.animal_poses[current_key]
+                print("We are now going to rescue animal ", msg.action)
+            except:
+                print("What Rescuer has entered is not a real key! Error.")
+                current_key = self.animal_poses.keys()[0]
+                pose  = self.animal_poses[current_key]
+            #We set the new goal and start navigating here
+            self.x_g, self.y_g, self.theta_g = pose[1]
+            rospy.loginfo("Trying to rescue: {} at {}".format(self.animal_poses[current_key][0], self.animal_poses[current_key][1]))
+            del self.animal_poses[current_key]
+            self.mode = Mode.NAV
+
+        #Bob has a cold and Veggie did not hear the message
+        else:
+            rospy.loginfo("The rescue message: {} is unidentifiable".format(msg))
+
+    def send_rescue_choices_to_bob(self):
+        # ------------ PUBLISHING OF RESCUE MESSAGE ---------------
+        Next_Rescue_Message = RescueMessage()
+        Next_Rescue_Message.action = "CHOICE"
+        animal_poses_x_list = []
+        animal_poses_y_list = []
+        animal_classes = []
+        keys = []
+        for key, value in self.animal_poses.iteritems():
+            keys.append(key)
+            temp_x = [value[1][0]]
+            animal_poses_x_list.append(temp_x)
+            temp_y = [value[1][1]]
+            animal_poses_y_list.append(temp_y)
+            temp_c = [value[0]]
+            animal_classes.append(temp_c)
+        Next_Rescue_Message.keys = keys
+        Next_Rescue_Message.animal_poses_x_list = animal_poses_x_list
+        Next_Rescue_Message.animal_poses_y_list = animal_poses_y_list
+        Next_Rescue_Message.animal_classes = animal_classes
+        Next_Rescue_Message.current_x = self.x
+        Next_Rescue_Message.current_y = self.y
+        self.rescuer_publisher.publish(Next_Rescue_Message)
+        return
+        # -------------------------------------------------------------------
+
 
     def rviz_goal_callback(self, msg):
         """ callback for a pose goal sent through rviz """
@@ -314,29 +372,26 @@ class Supervisor:
             rospy.loginfo("Current Mode: %s", self.mode)
             self.last_mode_printed = self.mode
 
-        #original
-        # if not(self.last_high_mode_printed == self.high_mode):
-        #     rospy.loginfo("Current High Mode: %s", self.high_mode)
-        #     self.last_high_mode_printed = self.high_mode
-
-        #Back Home
         if not(self.last_high_mode_printed == self.high_mode):
             rospy.loginfo("Current High Mode: %s", self.high_mode)
-            if(self.high_mode == High_Mode.RESCUE and self.rescue_end is None):
-                self.rescue_end = np.array([self.x, self.y, self.theta])
             self.last_high_mode_printed = self.high_mode
-
 
         # checks wich mode it is in and acts accordingly
         if self.mode == Mode.IDLE:
             # send zero velocity
-            if self.high_mode == High_Mode.RESCUE and len(self.animal_poses) > 0 and not self.menu_published:
-                menu = ""
-                for k in sorted(self.animal_poses):
-                    anm_class, anm_pose = self.animal_poses[k]
-                    menu += "{}: {} at {} \n".format(k, anm_class, anm_pose)
-                self.to_Bob_publisher.publish(menu)
-                self.menu_published = True
+            # if (self.high_mode == High_Mode.RESCUE and len(self.animal_poses) > 0):
+            #     current_key = self.animal_poses.keys()[0]
+            #     pose  = self.animal_poses[current_key]
+            #     self.x_g, self.y_g, self.theta_g = pose[1]
+            #     rospy.loginfo("Trying to rescue: {} at {}".format(self.animal_poses[current_key][0], self.animal_poses[current_key][1]))
+            #     del self.animal_poses[current_key]
+            #     self.mode = Mode.NAV
+
+            # --- RESCUE PUB CHANGE -----------------------------------------------------------------------------------------------------
+            if (self.high_mode == High_Mode.RESCUE and len(self.animal_poses) > 0) and self.rescue_message_published==0:
+                self.send_rescue_choices_to_bob()
+                self.stay_idle()
+                self.rescue_message_published = 1
 
             # EXPLORATION - MOD
             # elif (self.high_mode == High_Mode.EXPLORE and len(self.exploration_points)>0):
@@ -345,15 +400,6 @@ class Supervisor:
             #     self.x_g, self.y_g, self.theta_g = current_pose
             #     del self.exploration_points[0]
             #     self.mode = Mode.NAV
-
-
-            #Back home
-            elif(self.high_mode == High_Mode.RESCUE and len(self.animal_poses) == 0):
-                self.x_g, self.y_g, self.theta_g = self.rescue_end
-                rospy.loginfo("Completed Rescue, going back to fire station")
-                self.mode = Mode.NAV
-                self.high_mode = High_Mode.COMPLETE
-
 
             else:
                 self.stay_idle()

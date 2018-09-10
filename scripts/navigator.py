@@ -4,7 +4,7 @@ import rospy
 from nav_msgs.msg import OccupancyGrid, MapMetaData, Path
 from gazebo_msgs.msg import ModelStates
 from geometry_msgs.msg import Twist, PoseArray, Pose2D, PoseStamped
-from std_msgs.msg import Float32MultiArray, String
+from std_msgs.msg import Float32MultiArray, String, Bool
 import tf
 import numpy as np
 from numpy import linalg
@@ -85,6 +85,9 @@ class Navigator:
         self.nav_pathsp_pub = rospy.Publisher('/cmd_path_sp', PoseStamped, queue_size=10)
         self.nav_vel_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
 
+        # MODIFIED - RW
+        self.nav_path_fail_pub = rospy.Publisher('/cmd_path_fail', Bool, queue_size=10)
+
         self.trans_listener = tf.TransformListener()
 
         rospy.Subscriber('/map', OccupancyGrid, self.map_callback)
@@ -140,10 +143,12 @@ class Navigator:
             self.theta = euler[2]
         except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
             self.current_plan = []
+            rospy.loginfo("transform fail")
             return
 
         # makes sure we have a map
         if not self.occupancy:
+            rospy.loginfo("no occupancy")
             self.current_plan = []
             return
 
@@ -172,6 +177,8 @@ class Navigator:
 
             rospy.loginfo("Navigator: Computing navigation plan")
             if problem.solve():
+                self.nav_path_fail_pub.publish(Bool(False))
+                rospy.loginfo("problem solved")
                 if len(problem.path) > 3:
                     # cubic spline interpolation requires 4 points
                     self.current_plan = problem.path
@@ -218,6 +225,8 @@ class Navigator:
             else:
                 rospy.logwarn("Navigator: Could not find path")
                 self.current_plan = []
+                # HERE
+                self.nav_path_fail_pub.publish(Bool(True))
 
         # if we have a path, execute it (we need at least 3 points for this controller)
         if len(self.current_plan) > 3:

@@ -143,33 +143,23 @@ class Detector:
 
         ### YOUR CODE HERE ###
 
-        x = 1 # CHANGE ME
-        y = 0 # CHANGE ME
-        z = 0 # CHANGE ME
+        x = (u-self.cx)/self.fx # CHANGE ME
+        y = (v-self.cy)/self.fy # CHANGE ME
+        z = 1 # CHANGE ME
+        mag = np.sqrt(x**2 + y**2 + z**2)
+        x = x/mag
+        y = y/mag
+        z = z/mag
 
         ### END OF YOUR CODE ###
 
         return (x,y,z)
 
-    def estimate_distance(self, thetaleft, thetaright, ranges):
-        """ estimates the distance of an object in between two angles
-        using lidar measurements """
+    def estimate_distance(self, ymin, ymax,yreal):
+        """ only estimates distance from stop sign using image corners """
+        k_dc = 330.
+        dist = k_dc*yreal/np.abs(ymax-ymin)/100 #m
 
-        leftray_indx = min(max(0,int(thetaleft/self.laser_angle_increment)),len(ranges))
-        rightray_indx = min(max(0,int(thetaright/self.laser_angle_increment)),len(ranges))
-
-        if leftray_indx<rightray_indx:
-            meas = ranges[rightray_indx:] + ranges[:leftray_indx]
-        else:
-            meas = ranges[rightray_indx:leftray_indx]
-
-        num_m, dist = 0, 0
-        for m in meas:
-            if m>0 and m<float('Inf'):
-                dist += m
-                num_m += 1
-        if num_m>0:
-            dist /= num_m
 
         return dist
 
@@ -231,8 +221,17 @@ class Detector:
                 if thetaright<0:
                     thetaright += 2.*math.pi
 
-                # estimate the corresponding distance using the lidar
-                dist = self.estimate_distance(thetaleft,thetaright,img_laser_ranges)
+                # estimate the corresponding distance using the camera
+                yreal = 10 #placeholder
+
+                if self.object_labels[cl] == 'stop_sign':
+                    yreal = 6 #cm
+                elif self.object_labels[cl] == 'cat':
+                    yreal = 10 #cm
+                elif self.object_labels[cl] == 'dog':
+                    yreal = 10 #cm
+
+                dist = self.estimate_distance(ymin,ymax,yreal)
 
                 if not self.object_publishers.has_key(cl):
                     self.object_publishers[cl] = rospy.Publisher('/detector/'+self.object_labels[cl],
@@ -261,10 +260,10 @@ class Detector:
 
         ### YOUR CODE HERE ###
 
-        self.cx = 0 # CHANGE ME
-        self.cy = 0 # CHANGE ME
-        self.fx = 1 # CHANGE ME
-        self.fy = 1 # CHANGE ME
+        self.cx = msg.K[2] # CHANGE ME
+        self.cy = msg.K[5] # CHANGE ME
+        self.fx = msg.K[0] # CHANGE ME
+        self.fy = msg.K[4] # CHANGE ME
 
         ### END OF YOUR CODE ###
 

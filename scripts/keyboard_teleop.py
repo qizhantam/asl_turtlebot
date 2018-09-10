@@ -32,6 +32,9 @@
 import rospy
 
 from geometry_msgs.msg import Twist
+from std_msgs.msg import Int16
+# MODIFIED
+from supervisor import Mode, High_Mode
 
 import sys, select, termios, tty
 
@@ -72,6 +75,17 @@ speedBindings={
         'c':(1,.9),
           }
 
+# MODIFIED
+lowModeBindings = {}
+for mode in Mode:
+    lowModeBindings[str(mode.value)] = mode.name
+del lowModeBindings["8"]
+highModeBindings = {}
+for mode in High_Mode:
+    highModeBindings[str(mode.value + len(lowModeBindings))] = mode.name
+del highModeBindings["10"]
+highModeBindings["0"] = High_Mode.COMPLETE
+
 def getKey():
     tty.setraw(sys.stdin.fileno())
     rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
@@ -91,9 +105,13 @@ def vels(speed,turn):
 
 if __name__=="__main__":
     settings = termios.tcgetattr(sys.stdin)
-    
+
     rospy.init_node('turtlebot_teleop')
-    pub = rospy.Publisher('/cmd_vel', Twist, queue_size=5)
+    pub = rospy.Publisher('/cmd_teleop_vel', Twist, queue_size=5)
+    mode_pub = rospy.Publisher('/cmd_teleop_mode', Int16, queue_size=5)
+
+    menu_state = False
+    menu_btn = False
 
     x = 0
     th = 0
@@ -109,6 +127,10 @@ if __name__=="__main__":
         print(vels(speed,turn))
         while(1):
             key = getKey()
+            menu_btn = False
+
+            if key == "": continue
+
             if key in moveBindings.keys():
                 x = moveBindings[key][0]
                 th = moveBindings[key][1]
@@ -127,6 +149,30 @@ if __name__=="__main__":
                 th = 0
                 control_speed = 0
                 control_turn = 0
+
+            elif key == "\t":
+                print "\nSelect mode -------------------------------"
+                print "Low mode options"
+                for k, mode in lowModeBindings.iteritems():
+                    print "{}) {}".format(k, mode)
+                print "High mode options"
+                for k, mode in highModeBindings.iteritems():
+                    print "{}) {}".format(k, mode)
+                menu_state = True
+                menu_btn = True
+
+            elif key in lowModeBindings and menu_state:
+                mode_pub.publish(int(key))
+                print "Low mode switched to: {}".format(lowModeBindings[key])
+                menu_state = False
+                menu_btn = True
+
+            elif key in highModeBindings and menu_state:
+                mode_pub.publish(int(key))
+                print "High mode switched to: {}".format(highModeBindings[key])
+                menu_state = False
+                menu_btn = True
+
             else:
                 count = count + 1
                 if count > 4:
@@ -152,14 +198,11 @@ if __name__=="__main__":
             else:
                 control_turn = target_turn
 
-            twist = Twist()
-            twist.linear.x = control_speed; twist.linear.y = 0; twist.linear.z = 0
-            twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = control_turn
-            pub.publish(twist)
-
-            #print("loop: {0}".format(count))
-            #print("target: vx: {0}, wz: {1}".format(target_speed, target_turn))
-            #print("publihsed: vx: {0}, wz: {1}".format(twist.linear.x, twist.angular.z))
+            if not menu_btn:
+                twist = Twist()
+                twist.linear.x = control_speed; twist.linear.y = 0; twist.linear.z = 0
+                twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = control_turn
+                pub.publish(twist)
 
     except Exception as e:
         print(e)
